@@ -16,8 +16,10 @@ type SCSICmdHandler interface {
 }
 
 type ReadWriterAtCmdHandler struct {
-	RW  ReadWriterAt
-	Inq *InquiryInfo
+	RW    ReadWriterAt
+	Inq   *InquiryInfo
+	Unmap Unmapper
+	Sync  Syncer
 }
 
 // InquiryInfo holds the general vendor information for the emulated SCSI Device. Fields used from this will be padded or trunacted to meet the spec.
@@ -39,15 +41,15 @@ func (h ReadWriterAtCmdHandler) HandleCommand(cmd *SCSICmd) (SCSIResponse, error
 		if h.Inq == nil {
 			h.Inq = &defaultInquiry
 		}
-		return EmulateInquiry(cmd, h.Inq)
+		return EmulateInquiry(cmd, h.Inq, h.unmapSupported())
 	case scsi.TestUnitReady:
 		return EmulateTestUnitReady(cmd)
 	case scsi.ServiceActionIn16:
-		return EmulateServiceActionIn(cmd)
+		return EmulateServiceActionIn(cmd, h.unmapSupported())
 	case scsi.ModeSense, scsi.ModeSense10:
-		return EmulateModeSense(cmd, false)
+		return EmulateModeSense(cmd, h.writeCacheEnabled())
 	case scsi.ModeSelect, scsi.ModeSelect10:
-		return EmulateModeSelect(cmd, false)
+		return EmulateModeSelect(cmd, h.writeCacheEnabled())
 	case scsi.Read6, scsi.Read10, scsi.Read12, scsi.Read16:
 		return EmulateRead(cmd, h.RW)
 	case scsi.Write6, scsi.Write10, scsi.Write12, scsi.Write16:
@@ -58,14 +60,22 @@ func (h ReadWriterAtCmdHandler) HandleCommand(cmd *SCSICmd) (SCSIResponse, error
 	return cmd.NotHandled(), nil
 }
 
-func EmulateInquiry(cmd *SCSICmd, inq *InquiryInfo) (SCSIResponse, error) {
+func (h ReadWriterAtCmdHandler) writeCacheEnabled() bool {
+	return h.Sync != nil
+}
+
+func (h ReadWriterAtCmdHandler) unmapSupported() bool {
+	return h.Unmap != nil
+}
+
+func EmulateInquiry(cmd *SCSICmd, inq *InquiryInfo, unmap bool) (SCSIResponse, error) {
 	if (cmd.GetCDB(1) & 0x01) == 0 {
 		if cmd.GetCDB(2) == 0x00 {
 			return EmulateStdInquiry(cmd, inq)
 		}
 		return cmd.IllegalRequest(), nil
 	}
-	return EmulateEvpdInquiry(cmd, inq)
+	return EmulateEvpdInquiry(cmd, inq, unmap)
 }
 
 func FixedString(s string, length int) []byte {
@@ -98,18 +108,20 @@ func EmulateStdInquiry(cmd *SCSICmd, inq *InquiryInfo) (SCSIResponse, error) {
 	return cmd.Ok(), nil
 }
 
-func EmulateEvpdInquiry(cmd *SCSICmd, inq *InquiryInfo) (SCSIResponse, error) {
+func EmulateEvpdInquiry(cmd *SCSICmd, inq *InquiryInfo, unmap bool) (SCSIResponse, error) {
 	vpdType := cmd.GetCDB(2)
 	log.Debugf("SCSI EVPD Inquiry 0x%x\n", vpdType)
 	switch vpdType {
 	case 0x0: // Supported VPD pages
 		// The absolute minimum.
-		data := make([]byte, 6)
+		data := make([]byte, 8)
 
-		// We support 0x00 and 0x83 only
-		data[3] = 2
+		data[3] = 4
+		// Supported pages
 		data[4] = 0x00
 		data[5] = 0x83
+		data[6] = 0xB0
+		data[7] = 0xB2
 
 		cmd.Write(data)
 		return cmd.Ok(), nil
@@ -178,29 +190,70 @@ func EmulateEvpdInquiry(cmd *SCSICmd, inq *InquiryInfo) (SCSIResponse, error) {
 
 		cmd.Write(data[:used])
 		return cmd.Ok(), nil
+	case 0xB0:
+		return EmulateEvpd0xB0(cmd, unmap)
+	case 0xB2:
+		return EmulateEvpd0xB2(cmd, unmap)
 	default:
 		return cmd.IllegalRequest(), nil
 	}
+}
+
+func EmulateEvpd0xB0(cmd *SCSICmd, unmap bool) (SCSIResponse, error) {
+	pageLength := 0x3c
+	data := make([]byte, pageLength+4)
+	data[1] = 0xB0
+	binary.BigEndian.PutUint16(data[2:4], uint16(0x3C))
+
+	if unmap {
+		//MAXIMUM UNMAP LBA COUNT
+		binary.BigEndian.PutUint32(data[20:24], 0xFFFFFFFF)
+
+		//MAXIMUM UNMAP BLOCK DESCRIPTOR COUNT
+		binary.BigEndian.PutUint32(data[24:28], 16)
+	}
+
+	cmd.Write(data)
+	return cmd.Ok(), nil
+}
+
+func EmulateEvpd0xB2(cmd *SCSICmd, unmap bool) (SCSIResponse, error) {
+	pageLength := 0x4
+	data := make([]byte, pageLength+4)
+	data[1] = 0xB2
+	binary.BigEndian.PutUint16(data[2:4], uint16(0x3C))
+	if unmap {
+		// LBPU
+		data[5] = 1 << 7
+	}
+
+	cmd.Write(data)
+	return cmd.Ok(), nil
 }
 
 func EmulateTestUnitReady(cmd *SCSICmd) (SCSIResponse, error) {
 	return cmd.Ok(), nil
 }
 
-func EmulateServiceActionIn(cmd *SCSICmd) (SCSIResponse, error) {
+func EmulateServiceActionIn(cmd *SCSICmd, unmap bool) (SCSIResponse, error) {
 	if cmd.GetCDB(1) == scsi.ReadCapacity16 {
-		return EmulateReadCapacity16(cmd)
+		return EmulateReadCapacity16(cmd, unmap)
 	}
 	return cmd.NotHandled(), nil
 }
 
-func EmulateReadCapacity16(cmd *SCSICmd) (SCSIResponse, error) {
+func EmulateReadCapacity16(cmd *SCSICmd, unmap bool) (SCSIResponse, error) {
 	buf := make([]byte, 32)
 	order := binary.BigEndian
 	// This is in LBAs, and the "index of the last LBA", so minus 1. Friggin spec.
 	order.PutUint64(buf[0:8], uint64(cmd.Device().Sizes().VolumeSize/cmd.Device().Sizes().BlockSize)-1)
 	// This is in BlockSize
 	order.PutUint32(buf[8:12], uint32(cmd.Device().Sizes().BlockSize))
+
+	if unmap {
+		// LBPME
+		buf[14] = 1 << 7
+	}
 	// All the rest is 0
 	cmd.Write(buf)
 	return cmd.Ok(), nil
