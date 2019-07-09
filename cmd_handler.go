@@ -54,6 +54,8 @@ func (h ReadWriterAtCmdHandler) HandleCommand(cmd *SCSICmd) (SCSIResponse, error
 		return EmulateRead(cmd, h.RW)
 	case scsi.Write6, scsi.Write10, scsi.Write12, scsi.Write16:
 		return EmulateWrite(cmd, h.RW)
+	case scsi.Unmap:
+		return EmulateUnmap(cmd, h.Unmap)
 	default:
 		log.Debugf("Ignore unknown SCSI command 0x%x\n", cmd.Command())
 	}
@@ -431,5 +433,9 @@ func EmulateWrite(cmd *SCSICmd, r io.WriterAt) (SCSIResponse, error) {
 		log.Errorln("write/write failed: unable to copy enough")
 		return cmd.MediumError(), nil
 	}
+	return cmd.Ok(), nil
+}
+
+func EmulateUnmap(cmd *SCSICmd, u Unmapper) (SCSIResponse, error) {
 	return cmd.Ok(), nil
 }
