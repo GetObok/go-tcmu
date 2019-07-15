@@ -53,7 +53,7 @@ func (h ReadWriterAtCmdHandler) HandleCommand(cmd *SCSICmd) (SCSIResponse, error
 	case scsi.Read6, scsi.Read10, scsi.Read12, scsi.Read16:
 		return EmulateRead(cmd, h.RW)
 	case scsi.Write6, scsi.Write10, scsi.Write12, scsi.Write16:
-		return EmulateWrite(cmd, h.RW)
+		return EmulateWrite(cmd, h.RW, h.Sync)
 	case scsi.Unmap:
 		return EmulateUnmap(cmd, h.Unmap)
 	case scsi.SynchronizeCache, scsi.SynchronizeCache16:
@@ -407,7 +407,7 @@ func EmulateRead(cmd *SCSICmd, r io.ReaderAt) (SCSIResponse, error) {
 	return cmd.Ok(), nil
 }
 
-func EmulateWrite(cmd *SCSICmd, r io.WriterAt) (SCSIResponse, error) {
+func EmulateWrite(cmd *SCSICmd, r io.WriterAt, s Syncer) (SCSIResponse, error) {
 	offset := cmd.LBA() * uint64(cmd.Device().Sizes().BlockSize)
 	length := int(cmd.XferLen() * uint32(cmd.Device().Sizes().BlockSize))
 	if cmd.Buf == nil {
@@ -434,6 +434,14 @@ func EmulateWrite(cmd *SCSICmd, r io.WriterAt) (SCSIResponse, error) {
 	if n < length {
 		log.Errorln("write/write failed: unable to copy enough")
 		return cmd.MediumError(), nil
+	}
+
+	// DPO is set
+	if s != nil && cmd.CdbLen() > 6 && cmd.cdb[1]&0x8 > 0 {
+		if err := s.DataSync(int64(offset), int64(length)); err != nil {
+			log.Errorln("write/write failed: unable to sync: error:", err)
+			return cmd.MediumError(), nil
+		}
 	}
 	return cmd.Ok(), nil
 }
@@ -472,6 +480,12 @@ func EmulateUnmap(cmd *SCSICmd, u Unmapper) (SCSIResponse, error) {
 func EmulateSyncCache(cmd *SCSICmd, s Syncer) (SCSIResponse, error) {
 	offset := int64(cmd.LBA()) * cmd.Device().Sizes().BlockSize
 	length := int64(cmd.XferLen()) * cmd.Device().Sizes().BlockSize
+	if length == 0 {
+		length = cmd.Device().Sizes().VolumeSize - offset
+		if length < 0 {
+			return cmd.IllegalRequest(), nil
+		}
+	}
 	if err := s.DataSync(offset, length); err != nil {
 		log.Errorln("sync cache failed: error:", err)
 		return cmd.MediumError(), nil
