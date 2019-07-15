@@ -437,5 +437,32 @@ func EmulateWrite(cmd *SCSICmd, r io.WriterAt) (SCSIResponse, error) {
 }
 
 func EmulateUnmap(cmd *SCSICmd, u Unmapper) (SCSIResponse, error) {
+	const blockDescLen = 16
+	bs := uint64(cmd.Device().Sizes().BlockSize)
+
+	if len(cmd.vecs) == 0 {
+		return cmd.IllegalRequest(), nil
+	}
+
+	unmapParams := cmd.vecs[0]
+	var blockDescs []UnmapBlockDescriptor
+	for off := 8; off+blockDescLen <= len(unmapParams); off += blockDescLen {
+		lba := binary.BigEndian.Uint64(unmapParams[off : off+8])
+		num := binary.BigEndian.Uint32(unmapParams[off+8 : off+12])
+		blockDescs = append(blockDescs, UnmapBlockDescriptor{
+			Offset: lba * bs,
+			TL:     num * uint32(bs),
+		})
+	}
+
+	if len(blockDescs) == 0 {
+		return cmd.Ok(), nil
+	}
+
+	if err := u.Unmap(blockDescs); err != nil {
+		log.Errorln("unmap failed: error:", err)
+		return cmd.MediumError(), nil
+	}
+
 	return cmd.Ok(), nil
 }
