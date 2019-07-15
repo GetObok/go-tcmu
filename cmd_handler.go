@@ -56,6 +56,8 @@ func (h ReadWriterAtCmdHandler) HandleCommand(cmd *SCSICmd) (SCSIResponse, error
 		return EmulateWrite(cmd, h.RW)
 	case scsi.Unmap:
 		return EmulateUnmap(cmd, h.Unmap)
+	case scsi.SynchronizeCache, scsi.SynchronizeCache16:
+		return EmulateSyncCache(cmd, h.Sync)
 	default:
 		log.Debugf("Ignore unknown SCSI command 0x%x\n", cmd.Command())
 	}
@@ -461,6 +463,17 @@ func EmulateUnmap(cmd *SCSICmd, u Unmapper) (SCSIResponse, error) {
 
 	if err := u.Unmap(blockDescs); err != nil {
 		log.Errorln("unmap failed: error:", err)
+		return cmd.MediumError(), nil
+	}
+
+	return cmd.Ok(), nil
+}
+
+func EmulateSyncCache(cmd *SCSICmd, s Syncer) (SCSIResponse, error) {
+	offset := int64(cmd.LBA()) * cmd.Device().Sizes().BlockSize
+	length := int64(cmd.XferLen()) * cmd.Device().Sizes().BlockSize
+	if err := s.DataSync(offset, length); err != nil {
+		log.Errorln("sync cache failed: error:", err)
 		return cmd.MediumError(), nil
 	}
 
