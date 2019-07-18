@@ -232,7 +232,7 @@ func (d *Device) writeLines(target string, lines []string) error {
 	for _, line := range lines {
 		content := []byte(line + "\n")
 		logrus.Debugf("Setting %s: %s", target, line)
-		if err := ioutil.WriteFile(target, content, 0755); err != nil {
+		if err := ioutil.WriteFile(target, content, 0755); err != nil && !os.IsExist(err) {
 			logrus.Errorf("Failed to write %s to %s: %v", line, target, err)
 			return err
 		}

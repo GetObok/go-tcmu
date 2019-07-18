@@ -309,6 +309,19 @@ type ReadWriterAt interface {
 	io.WriterAt
 }
 
+type UnmapBlockDescriptor struct {
+	Offset uint64
+	TL     uint32
+}
+
+type Unmapper interface {
+	Unmap([]UnmapBlockDescriptor) error
+}
+
+type Syncer interface {
+	DataSync(offset, tl int64) error
+}
+
 func BasicSCSIHandler(rw ReadWriterAt) *SCSIHandler {
 	return &SCSIHandler{
 		HBA:        30,
